@@ -108,9 +108,12 @@ class BinaryNade(Sequential):
         Returns the negative log-likelihood of the parameters given the
         input data.
 
-        :param x: The input data.
-        :param prob_x: The probability that the model gives to the data.
-        :return: The negative log likelihood.
+        :param x: (N, D) tensor, where N is the number of examples and D is the 
+                  dimension of the input data.
+        :param prob_x: (N, D) tensor, where the dth dimension in each case is 
+                       the conditional probability of the dth element of the 
+                       input being one given all the previous d-1 elements. 
+        :return: The mean negative log likelihood of the data. 
         """
         return -K.mean(K.sum((x * K.log(prob_x) + (1 - x) * K.log(1 - prob_x)), axis=1))
 
