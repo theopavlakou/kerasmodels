@@ -42,11 +42,12 @@ def get_encoder_output_and_loss(input_data, num_hidden_layers=3):
     """
 
     :param input_data: Keras Input of dimention input_dim.
-    :return:    z_mean: the mean of the latent space variables of shape
+    :num_hidden_layers: the number of hidden layers in the encoder.
+    :return z_mean: the mean of the latent space variables of shape
                         (batch_size, latent_dim).
-                z_log_var: the log variance of the latent space variables of
+    :return z_log_var: the log variance of the latent space variables of
                         shape (batch_size, latent_dim).
-                vae_loss: the loss for the variational autoencoder.
+    :return vae_loss: the loss for the variational autoencoder.
     """
     encoder_hidden_layer = Dense(intermediate_dim,
                                 activation='relu')(input_data)
@@ -90,10 +91,12 @@ def get_decoder_output_and_model(latent_var, num_hidden_layers=3):
     the VAE that maps from the latent space to the data space again.
     :param latent_var: the latent space variables of shape
                         (batch_size, latent_dim).
-    :return:    decoder_output_mean: the output of the decoder of shape
+    :param num_hidden_layers: the number of hidden layers in the decoder.
+
+    :return decoder_output_mean: the output of the decoder of shape
                                     (batch_size, input_dim).
-                generator: a Keras model that maps from the latent space to the
-                            data space again.
+    :return generator:  a Keras model that maps from the latent space to the
+                        data space again.
     """
     layers = []
     for l in xrange(num_hidden_layers):
@@ -121,12 +124,15 @@ def get_vae_encoder_and_decoder(optimizer='adam', num_hidden_layers_encoder=3,
     """
     Get the VAE, its encoder and its decoder.
     :param optimizer: name of the optimizer to use when optimizing the VAE.
-    :return:    vae:    the VAE which maps from input data to the latent space
-                        and back to the input data space.
-                encoder: a Keras model that maps from the input space to the
-                        latent space.
-                generator:  a Keras model that maps from the latent space to the
-                            data space again.
+    :num_hidden_layers_encoder: the number of hidden layers in the encoder.
+    :num_hidden_layers_decoder: the number of hidden layers in the decoder.
+
+    :return vae:    the VAE which maps from input data to the latent space
+                    and back to the input data space.
+    :return encoder: a Keras model that maps from the input space to the
+                     latent space.
+    :return generator:  a Keras model that maps from the latent space to the
+                        data space again.
     """
     input_data = get_input()
     z_mean, z_log_var, vae_loss = get_encoder_output_and_loss(input_data,
