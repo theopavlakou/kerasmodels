@@ -1,7 +1,7 @@
 from __future__ import division
 from keras.models import Sequential, Model
 from keras.engine.topology import Layer
-from keras.layers import Input, merge
+from keras.layers import Input
 from keras.initializations import glorot_normal
 from keras.layers import Activation
 from keras import backend as K
@@ -41,6 +41,7 @@ class NadeInputLayer(Layer):
         self.W = self.weight_init((self.input_dim, self.output_dim), name="W_input_to_hidden")
         self.rho = self.weight_init((self.input_dim,), name="rho_activation_multiplier")
         self.trainable_weights = [self.W, self.rho]
+        super(NadeInputLayer, self).build(input_shape)  # Be sure to call this somewhere!
 
     def call(self, x, mask=None):
         activation = self.W.T * T.horizontal_stack(T.ones((x.shape[0], 1)), x[:, 0:-1]).dimshuffle(0, 'x', 1)
@@ -69,6 +70,7 @@ class NadeOutputBinaryLayer(Layer):
         self.V = self.weight_init((input_dim, self.output_dim), name="V_hidden_to_output")
         self.b = self.weight_init((self.output_dim,), name="b_output")
         self.trainable_weights = [self.V, self.b]
+        super(NadeOutputBinaryLayer, self).build(input_shape)  # Be sure to call this somewhere!
 
     def call(self, x, mask=None):
         return (self.V * x).sum(axis=1) + self.b
@@ -102,6 +104,8 @@ class RNadeOutputLayer(Layer):
 
         self.trainable_weights = [self.V_alpha, self.V_mu, self.V_sigma,
                                   self.b_alpha, self.b_mu, self.b_sigma]
+
+        super(RNadeOutputLayer, self).build(input_shape)  # Be sure to call this somewhere!
 
     def get_log_alpha(self, x):
         # (N, 1, H, D)
@@ -163,6 +167,9 @@ class RNade(Model):
         self.hidden_dim = hidden_dim
         self.num_components = number_components_per_conditional
         self.nonlinearity = nonlinearity
+        # TODO: Move to sample.
+        self.srng = RandomStreams()
+
 
         input = Input(shape=(self.input_dim, ))
         pre_activation = NadeInputLayer(self.hidden_dim, self.input_dim, weight_init=weight_init)(input)
@@ -176,8 +183,75 @@ class RNade(Model):
         return -log_probability_density.mean()
 
     def sample(self, N):
-        # TODO
-        pass
+
+        def sample_recursion(W, V_alpha, V_mu, V_sigma, b_alpha, b_mu, b_sigma, rho, a, x):
+            """
+            :param W: A (H,) symbolic matrix
+            :param V_alpha: A (K, H) symbolic matrix
+            :param V_mu: A (K, H) symbolic matrix
+            :param V_sigma: A (K, H) symbolic matrix
+            :param b_alpha: A (K,) symbolic matrix
+            :param b_mu: A (K,) symbolic matrix
+            :param b_sigma: A (K,) symbolic matrix
+            :param rho: A symbolic scalar
+            :param a: An (N, K) symbolic matrix
+            :param x: An (N, K) symbolic matrix
+            """
+            # (N x H)
+            a_plus_one = (a + x * W.dimshuffle('x', 0))
+
+            # (N x 1 x H)
+            h_plus_one = self.nonlinearity((a_plus_one * rho).dimshuffle(0, 'x', 1))
+
+            # (N x K) <= ((N x 1 x H) (1 x K x H)).sum(2) + (K)
+            mus = (h_plus_one * V_mu.dimshuffle('x', 0, 1)).sum(axis=2) + b_mu
+
+            # TODO here we are getting infs when the exponent is too large.
+            # (N x K) <= ((N x 1 x H) (1 x K x H)).sum(2) + (K)
+            log_sigmas = ((V_sigma * h_plus_one).sum(axis=2) + b_sigma).clip(-20, +20)
+
+            sigmas = T.exp(log_sigmas)
+
+            # TODO here we get NaNs when any element in the exponent is too large giving infs => inf/inf = NaN.
+            # TODO and then we get NaNs in the alphas when we go to sample from them.
+            # (N x K) <= ((N x 1 x H) (1 x K x H)).sum(2) + (K)
+            exponent_alpha = (V_alpha * h_plus_one).sum(axis=2) + b_alpha
+            # (N x K) <= (N x K) - (N x 1)
+            # One of these at least has to be zero and the rest have to be negative
+            exponent_alpha_minus_max = exponent_alpha - exponent_alpha.max(axis=1).dimshuffle(0, 'x')
+            # (N x K) <= (N x K)/(N x 1)
+            alphas = T.exp(exponent_alpha_minus_max) / T.exp(exponent_alpha_minus_max).sum(1).dimshuffle(0, 'x')
+
+            # (N x K) This returns a matrix of N rows where each row is 1 hot showing which
+            # component has been picked.
+            c = self.srng.multinomial(pvals=alphas, dtype=theano.config.floatX)
+            # (N)
+            sigmas_chosen = (sigmas * c).sum(axis=1)
+            # (N)
+            mus_chosen = (mus * c).sum(axis=1)
+            # (N x H)
+            x_plus_one = (
+            (self.srng.normal(size=(N,)) * sigmas_chosen + mus_chosen).dimshuffle(0, 'x') * np.ones((N, self.hidden_dim),
+                                                                                                    dtype=theano.config.floatX))
+            return [a_plus_one, x_plus_one]
+
+        a_init = K.zeros((N, self.hidden_dim), dtype="float32")
+        x_init = K.ones((N, self.hidden_dim), dtype="float32")
+
+        ((a_vals, x_vals), updates) = theano.scan(fn=sample_recursion,
+                                                  sequences=[self.layers[1].W,
+                                                             self.layers[-1].V_alpha.dimshuffle(2, 0, 1),
+                                                             self.layers[-1].V_mu.dimshuffle(2, 0, 1),
+                                                             self.layers[-1].V_sigma.dimshuffle(2, 0, 1),
+                                                             self.layers[-1].b_alpha.dimshuffle(1, 0),
+                                                             self.layers[-1].b_mu.dimshuffle(1, 0),
+                                                             self.layers[-1].b_sigma.dimshuffle(1, 0),
+                                                             self.layers[1].rho],
+                                                  outputs_info=[a_init, x_init])
+        # return x_vals[:, :, 0].T.eval()
+        r = x_vals[:, :, 0].T
+        f = theano.function(inputs=[], outputs=r, updates=updates)
+        return f()
 
 
 class BinaryNade(Sequential):
